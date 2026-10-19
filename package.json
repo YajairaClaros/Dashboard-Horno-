@@ -1,0 +1,13 @@
+{
+  "name": "dashboard-incubadora",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Panel de control de la incubadora con LM35 y foco incandescente.",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "ws": "^8.18.3"
+  }
+}

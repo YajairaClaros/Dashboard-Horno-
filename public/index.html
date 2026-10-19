@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="dark">
+  <meta name="color-scheme" content="light">
   <title>Incubadora · Panel de control</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -43,6 +43,7 @@
           <div>
             <p class="label">Temperatura de la caja</p>
             <p class="reading"><span id="temperatura">26,0</span><small>°C</small></p>
+            <p id="delta" class="delta">—</p>
             <p id="fase" class="status" aria-live="polite">Calentando</p>
             <p id="detalle" class="hint"></p>
             <dl class="facts">
@@ -115,18 +116,24 @@
       <section class="card chart-card">
         <div class="chart-head">
           <div>
-            <p class="label">Registro</p>
-            <h2>Últimos 3 minutos</h2>
+            <p class="label">Historial</p>
+            <h2>Temperatura</h2>
           </div>
           <ul class="legend">
-            <li><i class="swatch swatch-off"></i>Foco apagado</li>
-            <li><i class="swatch swatch-on"></i>Foco encendido</li>
+            <li><i class="swatch swatch-temp"></i>Temperatura de la caja</li>
             <li><i class="swatch swatch-set"></i>Consigna</li>
+            <li><i class="swatch swatch-on"></i>Foco encendido</li>
           </ul>
         </div>
         <div class="chart-wrap">
-          <canvas id="grafica" width="800" height="280"></canvas>
+          <canvas id="grafica" width="800" height="280" aria-label="Historial de temperatura. Pasa el cursor para ver un instante."></canvas>
+          <div id="puntero" class="chart-tip" hidden>
+            <strong id="puntero-temp">—</strong>
+            <span id="puntero-hora"></span>
+            <span id="puntero-foco"></span>
+          </div>
         </div>
+        <p class="hint">Pasa el cursor por la línea para ver la hora y si el foco estaba encendido.</p>
         <dl class="stats">
           <div><dt>Mínima</dt><dd id="stat-min">—</dd></div>
           <div><dt>Promedio</dt><dd id="stat-avg">—</dd></div>
@@ -198,8 +205,14 @@
       <section class="card log-card">
         <div class="chart-head">
           <div>
-            <p class="label">Bitácora</p>
-            <h2>Qué ha pasado</h2>
+            <p class="label">Historial</p>
+            <h2>Eventos</h2>
+          </div>
+          <div class="filters" role="group" aria-label="Filtrar eventos">
+            <button type="button" data-filtro="todos" aria-pressed="true">Todos</button>
+            <button type="button" data-filtro="foco">Foco</button>
+            <button type="button" data-filtro="consigna">Consigna</button>
+            <button type="button" data-filtro="corte">Seguridad</button>
           </div>
         </div>
         <ol id="registro"></ol>

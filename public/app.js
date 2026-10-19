@@ -16,6 +16,7 @@ const els = {
   fuente: $("fuente"),
   fuenteTexto: $("fuente-texto"),
   temperatura: $("temperatura"),
+  delta: $("delta"),
   fase: $("fase"),
   detalle: $("detalle"),
   hechoConsigna: $("hecho-consigna"),
@@ -53,6 +54,10 @@ const els = {
   statAvg: $("stat-avg"),
   statMax: $("stat-max"),
   grafica: $("grafica"),
+  puntero: $("puntero"),
+  punteroTemp: $("puntero-temp"),
+  punteroHora: $("puntero-hora"),
+  punteroFoco: $("puntero-foco"),
   registro: $("registro"),
   bannerCorte: $("banner-corte"),
   bannerSensor: $("banner-sensor"),
@@ -76,6 +81,9 @@ let eventos = [];
 let socketAbierta = false;
 let huboSocket = false;
 let registroFirma = "";
+let filtroEventos = "todos";
+let cursor = null;
+let marco = null;
 let avisoTimer = 0;
 let ajusteTimer = 0;
 let ajustePendiente = false;
@@ -154,6 +162,18 @@ function pintar(datos) {
     : datos.limiteSeguridad;
 
   els.temperatura.textContent = fmt1.format(datos.temperatura);
+  const diferencia = datos.temperatura - consignaVisible;
+  const enBanda = Math.abs(diferencia) <= histeresisVisible / 2;
+  const lectura = els.temperatura.parentElement;
+  lectura.classList.toggle("is-ok", enBanda);
+  lectura.classList.toggle("is-hot", !enBanda && diferencia > 0);
+  lectura.classList.toggle("is-cool", !enBanda && diferencia <= 0);
+  els.delta.textContent = enBanda
+    ? "Dentro de la banda de la consigna"
+    : diferencia > 0
+      ? `${fmt1.format(diferencia)} °C por encima de la consigna`
+      : `${fmt1.format(Math.abs(diferencia))} °C por debajo de la consigna`;
+  els.delta.dataset.lado = enBanda ? "ok" : diferencia > 0 ? "arriba" : "abajo";
   els.fase.textContent = TEXTOS[datos.fase] || datos.fase;
   els.fase.dataset.fase = datos.fase;
   els.detalle.textContent = detalleDe(datos, consignaVisible);
@@ -231,23 +251,87 @@ function pintar(datos) {
   dibujar();
 }
 
+function horaCorta(fecha, conSegundos) {
+  return fecha.toLocaleTimeString("es-CR", {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: conSegundos ? "2-digit" : undefined,
+    hourCycle: "h23",
+  });
+}
+
+function eventoVisible(evento) {
+  if (filtroEventos === "todos") return true;
+  if (filtroEventos === "foco") return evento.tipo === "foco" || evento.tipo === "modo";
+  if (filtroEventos === "consigna") return ["consigna", "histeresis", "limite"].includes(evento.tipo);
+  if (filtroEventos === "corte") return evento.tipo === "corte" || evento.tipo === "sensor";
+  return true;
+}
+
 function pintarRegistro() {
-  const firma = eventos.map((evento) => `${evento.t}:${evento.texto}`).join("|");
+  const visibles = eventos.filter(eventoVisible).slice(0, 12);
+  const firma = `${filtroEventos}|${visibles.map((evento) => `${evento.t}:${evento.texto}`).join("|")}`;
   if (firma === registroFirma) return;
   registroFirma = firma;
   els.registro.replaceChildren();
-  for (const evento of eventos.slice(0, 8)) {
+  if (!visibles.length) {
+    const vacio = document.createElement("li");
+    vacio.className = "log-vacio";
+    vacio.textContent = eventos.length
+      ? "No hay eventos de este tipo."
+      : "Todavía no hay eventos.";
+    els.registro.append(vacio);
+    return;
+  }
+  for (const evento of visibles) {
     const item = document.createElement("li");
+    item.tabIndex = 0;
     const hora = document.createElement("time");
-    hora.dateTime = new Date(evento.t).toISOString();
-    hora.textContent = new Date(evento.t).toLocaleTimeString("es-CR", {
-      hour: "2-digit",
-      minute: "2-digit",
-      second: "2-digit",
+    const marca = new Date(evento.t);
+    hora.dateTime = marca.toISOString();
+    hora.textContent = horaCorta(marca, true);
+    const punto = document.createElement("span");
+    punto.className = `log-dot dot-${evento.tipo || "nota"}`;
+    const texto = document.createElement("span");
+    texto.textContent = evento.texto;
+    item.append(hora, punto, texto);
+    const abrir = () => enfocarEvento(evento, item);
+    item.addEventListener("click", abrir);
+    item.addEventListener("keydown", (tecla) => {
+      if (tecla.key === "Enter" || tecla.key === " ") {
+        tecla.preventDefault();
+        abrir();
+      }
     });
-    item.append(hora, document.createTextNode(evento.texto));
     els.registro.append(item);
   }
+}
+
+function muestraCercana(instante) {
+  const puntos = muestrasVisibles();
+  let mejor = null;
+  let distancia = Infinity;
+  for (const punto of puntos) {
+    const delta = Math.abs(punto.t - instante);
+    if (delta < distancia) {
+      distancia = delta;
+      mejor = punto;
+    }
+  }
+  return distancia <= 20000 ? mejor : null;
+}
+
+function enfocarEvento(evento, item) {
+  for (const fila of els.registro.children) fila.classList.remove("is-selected");
+  item.classList.add("is-selected");
+  const punto = muestraCercana(evento.t);
+  if (!punto) {
+    mostrarAviso("Ese momento ya salió de los últimos 3 minutos.");
+    return;
+  }
+  cursor = punto;
+  dibujar();
+  document.querySelector(".chart-card").scrollIntoView({ behavior: "smooth", block: "center" });
 }
 
 function muestrasVisibles() {
@@ -304,96 +388,206 @@ function dibujar() {
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, ancho, alto);
 
-  const pad = { l: 44, r: 12, t: 16, b: 28 };
+  const colores = getComputedStyle(document.documentElement);
+  const colorTemp = colores.getPropertyValue("--temp").trim() || "#3ddec8";
+  const colorAmber = colores.getPropertyValue("--amber").trim() || "#ffb020";
+  const colorPeligro = colores.getPropertyValue("--danger").trim() || "#ff6b5a";
+  const colorEje = colores.getPropertyValue("--faint").trim() || "#7f9099";
+
+  const pad = { l: 46, r: 16, t: 16, b: 28 };
   const plotW = ancho - pad.l - pad.r;
   const plotH = alto - pad.t - pad.b;
   const ahora = Date.now();
   const x0 = ahora - VENTANA_MS;
   const puntos = muestrasVisibles();
   const consigna = estado ? estado.consigna : 37.5;
+  const histeresis = estado ? estado.histeresis : 1;
   const limite = estado ? estado.limiteSeguridad : 47;
   const valores = puntos.map((punto) => punto.temperatura);
-  let yMin = Math.min(22, consigna - 3, ...valores);
-  let yMax = Math.max(48, consigna + 3, limite, ...valores);
+  const referencia = valores.length ? valores : [consigna];
+  let yMin = Math.min(consigna - histeresis / 2, ...referencia);
+  let yMax = Math.max(consigna + histeresis / 2, ...referencia);
+  if (limite <= yMax + 6) yMax = Math.max(yMax, limite);
   if (!Number.isFinite(yMin) || !Number.isFinite(yMax)) {
-    yMin = 20;
-    yMax = 50;
+    yMin = consigna - 4;
+    yMax = consigna + 4;
   }
-  const margen = (yMax - yMin) * 0.12 || 1;
-  yMin -= margen;
-  yMax += margen;
+  const centro = (yMin + yMax) / 2;
+  const span = Math.max(8, yMax - yMin);
+  yMin = centro - span / 2 - 0.8;
+  yMax = centro + span / 2 + 0.8;
 
   const xDe = (t) => pad.l + ((t - x0) / VENTANA_MS) * plotW;
   const yDe = (v) => pad.t + (1 - (v - yMin) / (yMax - yMin)) * plotH;
+  const dentro = (v) => v >= yMin && v <= yMax;
+  marco = { pad, plotW, plotH, x0, ancho, xDe, yDe };
 
   ctx.font = "12px IBM Plex Mono, Segoe UI, monospace";
   ctx.lineWidth = 1;
-  ctx.strokeStyle = "rgba(236, 220, 196, 0.12)";
-  ctx.fillStyle = "#746b60";
-  const paso = yMax - yMin > 20 ? 5 : 2;
-  const inicio = Math.ceil(yMin / paso) * paso;
-  for (let marca = inicio; marca < yMax; marca += paso) {
+  ctx.strokeStyle = "rgba(28, 48, 64, 0.12)";
+  ctx.fillStyle = colorEje;
+  const paso = span <= 10 ? 1 : span <= 18 ? 2 : 5;
+  for (let marca = Math.ceil(yMin / paso) * paso; marca < yMax; marca += paso) {
     const y = yDe(marca);
+    if (y < pad.t || y > pad.t + plotH) continue;
     ctx.beginPath();
     ctx.moveTo(pad.l, y);
     ctx.lineTo(ancho - pad.r, y);
     ctx.stroke();
-    ctx.fillText(String(marca), 4, y + 4);
+    ctx.fillText(String(marca), 8, y + 4);
   }
 
-  for (let minutos = 3; minutos >= 0; minutos -= 1) {
-    const t = ahora - minutos * 60000;
-    const x = xDe(t);
-    ctx.fillStyle = "#746b60";
-    ctx.fillText(minutos === 0 ? "ahora" : `-${minutos} min`, x - (minutos === 0 ? 28 : 18), alto - 8);
+  if (estado && dentro(consigna)) {
+    const yBajo = yDe(consigna - histeresis / 2);
+    const yAlto = yDe(consigna + histeresis / 2);
+    ctx.fillStyle = "rgba(217, 132, 8, 0.12)";
+    ctx.fillRect(pad.l, Math.min(yAlto, yBajo), plotW, Math.abs(yBajo - yAlto));
   }
 
-  if (estado) {
-    const yBajo = yDe(consigna - estado.histeresis / 2);
-    const yAlto = yDe(consigna + estado.histeresis / 2);
-    ctx.fillStyle = "rgba(240, 162, 2, 0.10)";
-    ctx.fillRect(pad.l, yAlto, plotW, yBajo - yAlto);
-    ctx.save();
-    ctx.strokeStyle = "#e15d4c";
-    ctx.setLineDash([3, 4]);
-    ctx.beginPath();
-    ctx.moveTo(pad.l, yDe(limite));
-    ctx.lineTo(ancho - pad.r, yDe(limite));
-    ctx.stroke();
-    ctx.restore();
-  }
-
+  const cinta = 8;
   ctx.save();
   ctx.beginPath();
   ctx.rect(pad.l, pad.t, plotW, plotH);
   ctx.clip();
-  ctx.lineWidth = 2;
-  for (let i = 1; i < puntos.length; i += 1) {
+  ctx.fillStyle = "rgba(28, 48, 64, 0.08)";
+  ctx.fillRect(pad.l, pad.t + plotH - cinta, plotW, cinta);
+  ctx.fillStyle = colorAmber;
+  let tramo = null;
+  for (let i = 0; i < puntos.length; i += 1) {
+    if (puntos[i].foco && tramo == null) tramo = puntos[i].t;
+    const termina = !puntos[i].foco || i === puntos.length - 1;
+    if (tramo != null && termina) {
+      const anchoTramo = Math.max(3, xDe(puntos[i].t) - xDe(tramo));
+      ctx.fillRect(xDe(tramo), pad.t + plotH - cinta, anchoTramo, cinta);
+      tramo = null;
+    }
+  }
+
+  if (puntos.length > 1) {
+    const gradiente = ctx.createLinearGradient(0, pad.t, 0, pad.t + plotH);
+    gradiente.addColorStop(0, "rgba(12, 143, 132, 0.22)");
+    gradiente.addColorStop(1, "rgba(12, 143, 132, 0.02)");
     ctx.beginPath();
-    ctx.strokeStyle = puntos[i].foco ? "#f0a202" : "#f6f1e7";
-    ctx.moveTo(xDe(puntos[i - 1].t), yDe(puntos[i - 1].temperatura));
-    ctx.lineTo(xDe(puntos[i].t), yDe(puntos[i].temperatura));
+    ctx.moveTo(xDe(puntos[0].t), yDe(puntos[0].temperatura));
+    for (let i = 1; i < puntos.length; i += 1) {
+      ctx.lineTo(xDe(puntos[i].t), yDe(puntos[i].temperatura));
+    }
+    ctx.lineTo(xDe(puntos[puntos.length - 1].t), pad.t + plotH - cinta);
+    ctx.lineTo(xDe(puntos[0].t), pad.t + plotH - cinta);
+    ctx.closePath();
+    ctx.fillStyle = gradiente;
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.moveTo(xDe(puntos[0].t), yDe(puntos[0].temperatura));
+    for (let i = 1; i < puntos.length; i += 1) {
+      ctx.lineTo(xDe(puntos[i].t), yDe(puntos[i].temperatura));
+    }
+    ctx.strokeStyle = colorTemp;
+    ctx.lineWidth = 2.8;
+    ctx.lineJoin = "round";
+    ctx.lineCap = "round";
     ctx.stroke();
   }
   ctx.restore();
 
-  ctx.save();
-  ctx.strokeStyle = "#c4844a";
-  ctx.setLineDash([6, 5]);
-  ctx.lineWidth = 1.5;
-  ctx.beginPath();
-  ctx.moveTo(pad.l, yDe(consigna));
-  ctx.lineTo(ancho - pad.r, yDe(consigna));
-  ctx.stroke();
-  ctx.restore();
+  if (dentro(consigna)) {
+    ctx.save();
+    ctx.strokeStyle = colorAmber;
+    ctx.setLineDash([6, 5]);
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(pad.l, yDe(consigna));
+    ctx.lineTo(ancho - pad.r, yDe(consigna));
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  if (dentro(limite)) {
+    const yLimite = yDe(limite);
+    ctx.save();
+    ctx.strokeStyle = colorPeligro;
+    ctx.setLineDash([3, 4]);
+    ctx.lineWidth = 1.25;
+    ctx.beginPath();
+    ctx.moveTo(pad.l, yLimite);
+    ctx.lineTo(ancho - pad.r, yLimite);
+    ctx.stroke();
+    ctx.restore();
+    ctx.fillStyle = colorPeligro;
+    ctx.font = "11px IBM Plex Mono, Segoe UI, sans-serif";
+    ctx.fillText("límite", ancho - pad.r - 42, yLimite - 6);
+  }
+
+  ctx.fillStyle = colorEje;
+  ctx.font = "12px IBM Plex Mono, Segoe UI, monospace";
+  const marcas = ancho < 520 ? [0, 1.5, 3] : [0, 1, 2, 3];
+  for (const minutos of marcas) {
+    const t = x0 + minutos * 60000;
+    const texto = minutos === 3 ? "ahora" : horaCorta(new Date(t), false);
+    const medida = ctx.measureText(texto).width;
+    let x = xDe(t) - medida / 2;
+    if (minutos === 0) x = pad.l;
+    if (minutos === 3) x = ancho - pad.r - medida;
+    ctx.fillText(texto, x, alto - 8);
+  }
 
   if (puntos.length) {
     const ultimo = puntos[puntos.length - 1];
+    const x = xDe(ultimo.t);
+    const y = yDe(ultimo.temperatura);
     ctx.beginPath();
-    ctx.fillStyle = ultimo.foco ? "#f0a202" : "#f6f1e7";
-    ctx.arc(xDe(ultimo.t), yDe(ultimo.temperatura), 3.5, 0, Math.PI * 2);
+    ctx.fillStyle = "#ffffff";
+    ctx.arc(x, y, 5.5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = colorTemp;
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.fillStyle = colorTemp;
+    ctx.arc(x, y, 2.6, 0, Math.PI * 2);
     ctx.fill();
   }
+
+  if (cursor && (cursor.t < x0 || cursor.t > ahora)) cursor = null;
+  if (!cursor) {
+    els.puntero.hidden = true;
+    return;
+  }
+  const xCursor = xDe(cursor.t);
+  const yCursor = yDe(cursor.temperatura);
+  ctx.save();
+  ctx.strokeStyle = "rgba(28, 48, 64, 0.45)";
+  ctx.setLineDash([3, 4]);
+  ctx.beginPath();
+  ctx.moveTo(xCursor, pad.t);
+  ctx.lineTo(xCursor, pad.t + plotH - cinta);
+  ctx.stroke();
+  ctx.restore();
+  ctx.beginPath();
+  ctx.fillStyle = "#ffffff";
+  ctx.arc(xCursor, yCursor, 6.5, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = colorTemp;
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.fillStyle = colorTemp;
+  ctx.arc(xCursor, yCursor, 3.4, 0, Math.PI * 2);
+  ctx.fill();
+  colocarPuntero(cursor, xCursor, yCursor);
+}
+
+function colocarPuntero(punto, x, y) {
+  els.puntero.hidden = false;
+  els.punteroTemp.textContent = grado(punto.temperatura);
+  els.punteroHora.textContent = horaCorta(new Date(punto.t), true);
+  els.punteroFoco.textContent = punto.foco ? "Foco encendido" : "Foco apagado";
+  const anchoTip = 150;
+  let izquierda = x + 14;
+  if (izquierda + anchoTip > marco.ancho - 8) izquierda = Math.max(8, x - anchoTip - 10);
+  els.puntero.style.left = `${izquierda}px`;
+  els.puntero.style.top = `${Math.max(8, y - 36)}px`;
 }
 
 function ajustesActuales(registrar) {
@@ -552,6 +746,35 @@ fetch("/api/estado")
     if (!estado) incorporar({ tipo: "inicio", ...datos });
   })
   .catch(() => mostrarAviso("No se pudo abrir el panel."));
+
+els.grafica.addEventListener("pointermove", (evento) => {
+  if (!marco) return;
+  const rect = els.grafica.getBoundingClientRect();
+  const x = evento.clientX - rect.left;
+  if (x < marco.pad.l || x > marco.pad.l + marco.plotW) return;
+  const instante = marco.x0 + ((x - marco.pad.l) / marco.plotW) * VENTANA_MS;
+  const punto = muestraCercana(instante);
+  if (!punto || cursor === punto) return;
+  cursor = punto;
+  dibujar();
+});
+
+els.grafica.addEventListener("pointerleave", () => {
+  if (!cursor) return;
+  cursor = null;
+  dibujar();
+});
+
+document.querySelectorAll("[data-filtro]").forEach((boton) => {
+  boton.addEventListener("click", () => {
+    filtroEventos = boton.dataset.filtro;
+    document.querySelectorAll("[data-filtro]").forEach((otro) => {
+      otro.setAttribute("aria-pressed", String(otro === boton));
+    });
+    registroFirma = "";
+    pintarRegistro();
+  });
+});
 
 conectar();
 pintarReloj();
